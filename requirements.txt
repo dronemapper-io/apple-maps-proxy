@@ -1,0 +1,16 @@
+# Pinned runtime dependencies for apple-maps-proxy
+# Generated for Python 3.12
+
+selenium==4.39.0
+chromedriver-autoinstaller==0.6.4
+urllib3==2.6.2
+flask==3.1.2
+
+# Indirect pins (stability/reproducibility)
+werkzeug==3.1.4
+jinja2==3.1.6
+itsdangerous==2.2.0
+click==8.3.1
+blinker==1.9.0
+markupsafe==3.0.3
+

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local secrets / env
+.env
+.env.*
+
+# Downloaded drivers / binaries
+chromedriver
+**/chromedriver
+143/
+
+# Local cache/output
+.cache/
+
