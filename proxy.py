@@ -34,6 +34,43 @@ import urllib3
 from urllib.parse import urlencode, unquote
 
 
+# Chromedriver resolution can be invoked from multiple threads (background refresh + request path).
+# Cache it process-wide to avoid races and cwd-dependent installs.
+_CHROMEDRIVER_LOCK = threading.Lock()
+_CHROMEDRIVER_PATH: Optional[str] = None
+_CHROMEDRIVER_RESOLVED = False
+
+
+def _resolve_chromedriver_path() -> Optional[str]:
+    """Resolve a usable chromedriver path once per process, safely across threads."""
+    global _CHROMEDRIVER_PATH, _CHROMEDRIVER_RESOLVED
+
+    with _CHROMEDRIVER_LOCK:
+        if _CHROMEDRIVER_RESOLVED:
+            return _CHROMEDRIVER_PATH
+
+        chromedriver = os.environ.get("CHROMEDRIVER")
+        if not chromedriver:
+            try:
+                import chromedriver_autoinstaller
+
+                # Avoid cwd-dependent installs; use the library default install location.
+                chromedriver = chromedriver_autoinstaller.install()
+            except Exception:
+                chromedriver = None
+
+        # Normalize to absolute path when possible (helpful if callers change cwd).
+        if chromedriver:
+            try:
+                chromedriver = os.path.abspath(chromedriver)
+            except Exception:
+                pass
+
+        _CHROMEDRIVER_PATH = chromedriver
+        _CHROMEDRIVER_RESOLVED = True
+        return _CHROMEDRIVER_PATH
+
+
 def _extract_access_key_from_text(text: str) -> Optional[str]:
     key_start = "accessKey="
     i = text.find(key_start)
@@ -66,14 +103,7 @@ def _getAPIKey(timeout: float = 60) -> str:
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Selenium is required. Install with: pip install selenium") from e
 
-    chromedriver = os.environ.get("CHROMEDRIVER")
-    if not chromedriver:
-        try:
-            import chromedriver_autoinstaller
-
-            chromedriver = chromedriver_autoinstaller.install(cwd=True)
-        except Exception:
-            chromedriver = None
+    chromedriver = _resolve_chromedriver_path()
 
     options = webdriver.ChromeOptions()
     # Fast, lean headless setup
@@ -121,10 +151,23 @@ def _getAPIKey(timeout: float = 60) -> str:
     options.add_argument("--disable-blink-features=AutomationControlled")
 
     try:
-        if chromedriver:
-            driver = webdriver.Chrome(service=Service(chromedriver), options=options)
-        else:
-            driver = webdriver.Chrome(options=options)
+        try:
+            if chromedriver:
+                driver = webdriver.Chrome(service=Service(chromedriver), options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
+        except Exception:
+            # If chromedriver auto-install raced or produced a transient/bad path,
+            # clear cache and retry resolution once.
+            global _CHROMEDRIVER_RESOLVED
+            with _CHROMEDRIVER_LOCK:
+                _CHROMEDRIVER_RESOLVED = False
+            chromedriver = _resolve_chromedriver_path()
+
+            if chromedriver:
+                driver = webdriver.Chrome(service=Service(chromedriver), options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
             "Unable to start Chromium/Chrome driver. Ensure Chrome and chromedriver are installed "

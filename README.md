@@ -2,7 +2,7 @@
 
 A small Flask service that proxies Apple MapKit **satellite tile** requests.
 
-It uses a headless Chrome/Chromium (via Selenium) to load Apple Maps and scrape a short‑lived MapKit `accessKey` from Chrome **performance logs**. That `accessKey` is then appended to upstream tile requests.
+It uses a headless Chrome/Chromium (via Selenium) to load Apple Maps and scrape a short‑lived MapKit `accessKey` from Chrome **performance logs**. That `accessKey` is then appended to upstream tile requests. This was developed and run using Ubuntu LTS 24, YMMV on windows or other operating systems.
 
 ## What this does
 
