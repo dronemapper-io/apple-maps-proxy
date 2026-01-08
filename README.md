@@ -44,16 +44,14 @@ Start the proxy:
 python3 proxy.py
 ```
 
-#### Console/Servicec Logs:
+#### Console/Service Logs:
 ```commandline
 Jan 08 15:25:43 systemd[1]: Started amp.service - APPLE MAPS PROXY.
 Jan 08 15:25:43 python3[62498]: [2026-01-08 15:25:43,953] INFO in proxy: Fetching initial Apple Maps accessKey...
 Jan 08 15:25:46 python3[62498]:  * Serving Flask app 'proxy'
 Jan 08 15:25:46 python3[62498]:  * Debug mode: off
 Jan 08 15:35:59 python3[62498]: [2026-01-08 15:35:59,291] INFO in proxy: Refreshing Apple Maps accessKey (force=False, reason=scheduled)...
-Jan 08 15:35:59 python3[62498]: INFO:proxy:Refreshing Apple Maps accessKey (force=False, reason=scheduled)...
 Jan 08 15:36:01 python3[62498]: [2026-01-08 15:36:01,220] INFO in proxy: accessKey refreshed successfully in 1.9s
-Jan 08 15:36:01 python3[62498]: INFO:proxy:accessKey refreshed successfully in 1.9s
 ```
 
 By default it listens on `127.0.0.1:8081`.

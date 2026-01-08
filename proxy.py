@@ -270,6 +270,7 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     logger = app.logger
     logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+    logger.propagate = False
 
     logger.info("Fetching initial Apple Maps accessKey...")
     ak = access_key or _getAPIKey(timeout=timeout)
