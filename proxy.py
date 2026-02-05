@@ -26,12 +26,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
 import time
 from typing import Optional
-import threading
 
 import urllib3
-from urllib.parse import urlencode, unquote, urlparse, parse_qs
+from urllib.parse import parse_qs, urlencode, urlparse
 
 
 # Chromedriver resolution can be invoked from multiple threads (background refresh + request path).
@@ -39,6 +39,38 @@ from urllib.parse import urlencode, unquote, urlparse, parse_qs
 _CHROMEDRIVER_LOCK = threading.Lock()
 _CHROMEDRIVER_PATH: Optional[str] = None
 _CHROMEDRIVER_RESOLVED = False
+
+_APPLE_MAPS_URL = (
+    "https://maps.apple.com/frame?map=satellite&center=40.69%2C-111.90"
+    "&span=0.01756288968470443%2C0.06229506710420196"
+)
+_TILE_CDN_HOST = "sat-cdn.apple-mapkit.com"
+_TILE_CDN_URL = f"https://{_TILE_CDN_HOST}/tile"
+_DEFAULT_REFRESH_INTERVAL = 600.0
+_DEFAULT_REFRESH_COOLDOWN = 90.0
+_REQUEST_HEADER_ALLOWLIST = ("Accept", "User-Agent", "Referer", "Origin", "Range")
+_HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
+
+AccessKeyV = tuple[str, str]
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _resolve_chromedriver_path() -> Optional[str]:
@@ -71,7 +103,7 @@ def _resolve_chromedriver_path() -> Optional[str]:
         return _CHROMEDRIVER_PATH
 
 
-def _extract_access_key_and_v_from_url(url: str) -> Optional[tuple[str, str]]:
+def _extract_access_key_and_v_from_url(url: str) -> Optional[AccessKeyV]:
     try:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query)
@@ -84,7 +116,7 @@ def _extract_access_key_and_v_from_url(url: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _extract_access_key_and_v_from_log_message(msg: str) -> Optional[tuple[str, str]]:
+def _extract_access_key_and_v_from_log_message(msg: str) -> Optional[AccessKeyV]:
     try:
         decoded = json.loads(msg)
         message = decoded.get("message", {})
@@ -99,7 +131,7 @@ def _extract_access_key_and_v_from_log_message(msg: str) -> Optional[tuple[str, 
     return None
 
 
-def _getAPIKey(timeout: float = 60) -> tuple[str, str]:
+def _getAPIKey(timeout: float = 60) -> AccessKeyV:
     """Scrape Apple Maps accessKey using a headless Chromium instance.
 
     Performance-oriented implementation:
@@ -187,7 +219,7 @@ def _getAPIKey(timeout: float = 60) -> tuple[str, str]:
             "and compatible, or set CHROMEDRIVER."
         ) from e
 
-    def _scan_performance_logs(logs: list[dict]) -> Optional[tuple[str, str]]:
+    def _scan_performance_logs(logs: list[dict]) -> Optional[AccessKeyV]:
         """Extract accessKey and v from Chrome 'performance' log entries.
 
         Chrome emits multiple event types; handle the most common ones:
@@ -209,10 +241,10 @@ def _getAPIKey(timeout: float = 60) -> tuple[str, str]:
 
     try:
         driver.set_page_load_timeout(timeout)
-        driver.get("https://maps.apple.com/frame?map=satellite&center=40.69%2C-111.90&span=0.01756288968470443%2C0.06229506710420196")
+        driver.get(_APPLE_MAPS_URL)
 
         deadline = time.time() + timeout
-        key_contents: Optional[tuple[str, str]] = None
+        key_contents: Optional[AccessKeyV] = None
 
         # Drain logs continuously: Chrome may only return entries once.
         poll = 0.5
@@ -276,9 +308,9 @@ def create_app(*, v: Optional[str] = None, access_key: Optional[str] = None, tim
     refreshing = False
 
     # Refresh policy knobs
-    refresh_interval = float(os.environ.get("ACCESS_KEY_REFRESH_INTERVAL_SECONDS", "600"))
+    refresh_interval = _env_float("ACCESS_KEY_REFRESH_INTERVAL_SECONDS", _DEFAULT_REFRESH_INTERVAL)
     # Cooldown prevents redundant refreshes when the background worker and /tile 401/403 trigger overlap.
-    refresh_cooldown = float(os.environ.get("ACCESS_KEY_REFRESH_COOLDOWN_SECONDS", "90"))
+    refresh_cooldown = _env_float("ACCESS_KEY_REFRESH_COOLDOWN_SECONDS", _DEFAULT_REFRESH_COOLDOWN)
 
     # Track next planned refresh time for /health.
     next_refresh_at = ak_fetched_at + refresh_interval
@@ -404,16 +436,16 @@ def create_app(*, v: Optional[str] = None, access_key: Optional[str] = None, tim
 
         def make_upstream_url(key: str) -> str:
             q["accessKey"] = key
-            return f"https://sat-cdn.apple-mapkit.com/tile?{urlencode(q, safe='%')}"
+            return f"{_TILE_CDN_URL}?{urlencode(q, safe='%')}"
 
         # Request headers: forward a small safe allowlist.
         headers = {}
-        for h in ("Accept", "User-Agent", "Referer", "Origin", "Range"):
+        for h in _REQUEST_HEADER_ALLOWLIST:
             hv = request.headers.get(h)
             if hv:
                 headers[h] = hv
         headers["Accept-Encoding"] = "identity"
-        headers["Host"] = "sat-cdn.apple-mapkit.com"
+        headers["Host"] = _TILE_CDN_HOST
 
         def do_request(upstream_url: str):
             return http.request(
@@ -448,28 +480,17 @@ def create_app(*, v: Optional[str] = None, access_key: Optional[str] = None, tim
                 except Exception:
                     pass
 
-        hop_by_hop = {
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailers",
-            "transfer-encoding",
-            "upgrade",
-        }
         resp_headers = []
         for k, vv in r.headers.items():
             lk = k.lower()
-            if lk in hop_by_hop or lk == "content-encoding":
+            if lk in _HOP_BY_HOP or lk == "content-encoding":
                 continue
             resp_headers.append((k, vv))
 
         if not any(k.lower() == "content-type" for k, _ in resp_headers):
             resp_headers.append(("Content-Type", "image/jpeg"))
 
-        headers_dict = {k: vv for k, vv in resp_headers}
-        return Response(generate(), status=r.status, headers=headers_dict)
+        return Response(generate(), status=r.status, headers=resp_headers)
 
     return app
 
