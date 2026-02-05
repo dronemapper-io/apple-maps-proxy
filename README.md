@@ -10,7 +10,7 @@ It uses a headless Chrome/Chromium (via Selenium) to load Apple Maps and scrape 
 - Exposes a `/tile` endpoint compatible with typical XYZ tile clients
 - For each incoming tile request:
   - Adds `accessKey=<current access key>`
-  - Adds `v=<tile version>`
+  - Adds `v=<tile version>` (parsed dynamically from Apple Maps network traffic)
   - Proxies the request to Apple’s tile CDN (`sat-cdn.apple-mapkit.com`)
 
 ## Project layout
@@ -48,6 +48,7 @@ python3 proxy.py
 ```commandline
 Jan 08 15:25:43 systemd[1]: Started amp.service - APPLE MAPS PROXY.
 Jan 08 15:25:43 python3[62498]: [2026-01-08 15:25:43,953] INFO in proxy: Fetching initial Apple Maps accessKey...
+Jan 08 15:25:45 python3[62498]: Extracted accessKey=... v=...
 Jan 08 15:25:46 python3[62498]:  * Serving Flask app 'proxy'
 Jan 08 15:25:46 python3[62498]:  * Debug mode: off
 Jan 08 15:35:59 python3[62498]: [2026-01-08 15:35:59,291] INFO in proxy: Refreshing Apple Maps accessKey (force=False, reason=scheduled)...
@@ -87,7 +88,7 @@ http://127.0.0.1:8081/tile?style=7&size=2&scale=1&z=12&x=656&y=1583
 
 The server appends these query parameters when calling upstream:
 - `accessKey=<scraped>`
-- `v=<apple tile version>`
+- `v=<apple tile version>` (parsed from performance logs)
 
 ## How `accessKey` is fetched
 
@@ -96,21 +97,13 @@ The function `_getAPIKey()`:
 1. Starts headless Chrome/Chromium with performance logging enabled.
 2. Loads `https://maps.apple.com/`.
 3. Polls Chrome’s `performance` log entries.
-4. Extracts an `accessKey=...` substring from logged request/response URLs.
+4. Extracts `accessKey` and `v` from logged request/response URLs.
 
 Because Apple’s MapKit access keys expire, `proxy.py` will also refresh the key in the background periodically and retry once on `401/403` responses.
 
-## Important note about `v=10281` (hardcoded)
+## `v` handling
 
-In the current `proxy.py`, the `v` query parameter is **hardcoded** via:
-
-- `create_app(*, v: str = "10281", ...)`
-- `serve(..., v: str = "10281", ...)`
-- `/tile` always sets `q["v"] = v`
-
-This `v` value represents an Apple Maps tile/version identifier and **can change** with Apple Maps/MapKit releases.
-
-If Apple changes this version, requests may start failing until `v` is updated. A more robust approach is to parse `v` dynamically from the same Apple Maps network traffic where the `accessKey` is discovered.
+`v` is parsed dynamically from the same Apple Maps network traffic where the `accessKey` is discovered. This keeps the proxy aligned with Apple’s current tile version without manual updates.
 
 ## Configuration (environment variables)
 
@@ -131,4 +124,3 @@ This usually means the `accessKey` is expired or invalid. The proxy automaticall
 
 ### Running on servers/containers
 `--no-sandbox` and `--disable-dev-shm-usage` are enabled for better compatibility in containerized environments.
-

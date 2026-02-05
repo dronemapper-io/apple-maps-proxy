@@ -31,7 +31,7 @@ from typing import Optional
 import threading
 
 import urllib3
-from urllib.parse import urlencode, unquote
+from urllib.parse import urlencode, unquote, urlparse, parse_qs
 
 
 # Chromedriver resolution can be invoked from multiple threads (background refresh + request path).
@@ -71,22 +71,35 @@ def _resolve_chromedriver_path() -> Optional[str]:
         return _CHROMEDRIVER_PATH
 
 
-def _extract_access_key_from_text(text: str) -> Optional[str]:
-    key_start = "accessKey="
-    i = text.find(key_start)
-    if i < 0:
-        return None
-    rest = text[i + len(key_start) :]
-    # accessKey is typically URL-encoded and terminated by & or a quote.
-    for sep in ("&", '"', "'", "\\u0026"):
-        j = rest.find(sep)
-        if j > 0:
-            key = rest[:j]
-            return unquote(key)
-    return unquote(rest) if rest else None
+def _extract_access_key_and_v_from_url(url: str) -> Optional[tuple[str, str]]:
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        access_key = qs.get("accessKey", [None])[0]
+        v = qs.get("v", [None])[0]
+        if access_key and v:
+            return access_key, v
+    except Exception:
+        pass
+    return None
 
 
-def _getAPIKey(timeout: float = 60) -> str:
+def _extract_access_key_and_v_from_log_message(msg: str) -> Optional[tuple[str, str]]:
+    try:
+        decoded = json.loads(msg)
+        message = decoded.get("message", {})
+        params = message.get("params", {})
+        for key in ("request", "response"):
+            part = params.get(key, {})
+            url = part.get("url")
+            if isinstance(url, str) and "accessKey=" in url and "v=" in url:
+                return _extract_access_key_and_v_from_url(url)
+    except Exception:
+        pass
+    return None
+
+
+def _getAPIKey(timeout: float = 60) -> tuple[str, str]:
     """Scrape Apple Maps accessKey using a headless Chromium instance.
 
     Performance-oriented implementation:
@@ -174,8 +187,8 @@ def _getAPIKey(timeout: float = 60) -> str:
             "and compatible, or set CHROMEDRIVER."
         ) from e
 
-    def _scan_performance_logs(logs: list[dict]) -> Optional[str]:
-        """Extract accessKey from Chrome 'performance' log entries.
+    def _scan_performance_logs(logs: list[dict]) -> Optional[tuple[str, str]]:
+        """Extract accessKey and v from Chrome 'performance' log entries.
 
         Chrome emits multiple event types; handle the most common ones:
         - Network.requestWillBeSent (params.request.url)
@@ -186,43 +199,20 @@ def _getAPIKey(timeout: float = 60) -> str:
             if not msg or "accessKey=" not in msg:
                 continue
 
-            # Try structured decode first.
-            try:
-                decoded = json.loads(msg)
-                message = decoded.get("message", {})
-                params = message.get("params", {})
-
-                # request URL
-                req = params.get("request", {})
-                url = req.get("url")
-                if isinstance(url, str) and "accessKey=" in url:
-                    key = _extract_access_key_from_text(url)
-                    if key:
-                        return key
-
-                # response URL
-                resp = params.get("response", {})
-                url = resp.get("url")
-                if isinstance(url, str) and "accessKey=" in url:
-                    key = _extract_access_key_from_text(url)
-                    if key:
-                        return key
-            except Exception:
-                pass
-
-            # Fallback: raw substring search across the message.
-            key = _extract_access_key_from_text(msg)
-            if key:
-                return key
+            pair = _extract_access_key_and_v_from_log_message(msg)
+            if pair:
+                access_key, v_value = pair
+                print(f"Extracted accessKey={access_key} v={v_value}")
+                return access_key, v_value
 
         return None
 
     try:
         driver.set_page_load_timeout(timeout)
-        driver.get("https://maps.apple.com/")
+        driver.get("https://maps.apple.com/frame?map=satellite&center=40.69%2C-111.90&span=0.01756288968470443%2C0.06229506710420196")
 
         deadline = time.time() + timeout
-        key_contents: Optional[str] = None
+        key_contents: Optional[tuple[str, str]] = None
 
         # Drain logs continuously: Chrome may only return entries once.
         poll = 0.5
@@ -257,7 +247,7 @@ def _getAPIKey(timeout: float = 60) -> str:
             pass
 
 
-def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: float = 60):
+def create_app(*, v: Optional[str] = None, access_key: Optional[str] = None, timeout: float = 60):
     """Create the Flask proxy app."""
     from flask import Flask, Response, request
 
@@ -273,7 +263,11 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
     logger.propagate = False
 
     logger.info("Fetching initial Apple Maps accessKey...")
-    ak = access_key or _getAPIKey(timeout=timeout)
+    fetched_key, fetched_v = _getAPIKey(timeout=timeout)
+    ak = access_key or fetched_key
+    current_v = v or fetched_v
+    if not current_v:
+        raise RuntimeError("Unable to determine v from performance logs.")
     ak_fetched_at = time.time()
 
     # Concurrency controls / refresh coordination
@@ -296,7 +290,7 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
 
         Must be called with ak_lock held.
         """
-        nonlocal ak, ak_fetched_at, next_refresh_at, refreshing
+        nonlocal ak, ak_fetched_at, next_refresh_at, refreshing, current_v
 
         now = time.time()
         age = now - ak_fetched_at
@@ -321,8 +315,9 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
         try:
             logger.info("Refreshing Apple Maps accessKey (force=%s, reason=%s)...", force, reason)
             started = time.time()
-            new_key = _getAPIKey(timeout=timeout)
+            new_key, new_v = _getAPIKey(timeout=timeout)
             ak = new_key
+            current_v = new_v or current_v
             ak_fetched_at = time.time()
             next_refresh_at = ak_fetched_at + refresh_interval
             logger.info("accessKey refreshed successfully in %.1fs", ak_fetched_at - started)
@@ -338,6 +333,10 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
     def _force_refresh_key(reason: str) -> str:
         with ak_lock:
             return _maybe_refresh_locked(force=True, reason=reason)
+
+    def _get_current_v() -> str:
+        with ak_lock:
+            return current_v
 
     def _refresh_worker():
         # Schedule: refresh ~every interval, with jitter to spread load.
@@ -401,7 +400,7 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
     @app.get("/tile")
     def tile():
         q = request.args.to_dict()
-        q["v"] = v
+        q["v"] = _get_current_v()
 
         def make_upstream_url(key: str) -> str:
             q["accessKey"] = key
@@ -475,7 +474,7 @@ def create_app(*, v: str = "10281", access_key: Optional[str] = None, timeout: f
     return app
 
 
-def serve(host: str = "127.0.0.1", port: int = 8081, *, v: str = "10281", timeout: float = 60) -> None:
+def serve(host: str = "0.0.0.0", port: int = 8081, *, v: Optional[str] = None, timeout: float = 60) -> None:
     app = create_app(v=v, timeout=timeout)
     app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
 
